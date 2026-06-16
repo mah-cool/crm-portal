@@ -72,6 +72,8 @@
 
     reports: { label: 'Report manager', icon: '📈' },
     report_creator: { label: 'Report creator', icon: '🛠️' },
+    stock_reports: { label: 'Stock reports', icon: '📦' },
+    stock_movements: { label: 'Stock movements', icon: '🔁' },
 
     customers: {
       label: 'Customers', icon: '👤', entity: 'customers', singular: 'customer', manageAddresses: true, manageContacts: true, profile: true,
@@ -289,9 +291,9 @@
     { key: 'sales', label: 'Sales', items: ['customers', 'sales_orders', 'picking', 'delivery'] },
     { key: 'accounts', label: 'Accounts', items: ['invoices', 'accounts'] },
     { key: 'purchasing', label: 'Purchasing', items: ['suppliers', 'purchasing', 'loading'] },
-    { key: 'stock', label: 'Stock management', items: ['products', 'stock', 'locations'] },
+    { key: 'stock', label: 'Stock management', items: ['products', 'stock', 'stock_movements', 'locations'] },
     { key: 'haulage', label: 'Haulage', items: ['hauliers', 'haulage'] },
-    { key: 'reports', label: 'Reports', items: ['reports', 'report_creator'] }
+    { key: 'reports', label: 'Reports', items: ['reports', 'report_creator', 'stock_reports'] }
   ];
   function navGroupOf(key) {
     for (var i = 0; i < NAV_GROUPS.length; i++) if (NAV_GROUPS[i].items.indexOf(key) >= 0) return NAV_GROUPS[i].key;
@@ -380,6 +382,8 @@
     if (key === 'loading') return renderLoading(sub);
     if (key === 'reports') return renderReports();
     if (key === 'report_creator') return renderReportCreator();
+    if (key === 'stock_reports') return renderStockReports();
+    if (key === 'stock_movements') return renderStockMovements();
     if (key === 'customers') return sub ? renderCustomerProfile(sub) : renderCustomers();
     return renderModule(key, m);
   }
@@ -1167,7 +1171,7 @@
       '.head{display:flex;justify-content:space-between;border-bottom:2px solid #111;padding-bottom:10px}' +
       'table{width:100%;border-collapse:collapse;margin-top:18px}th,td{border:1px solid #ccc;padding:7px;font-size:12px}th{background:#f0f0f0;text-align:left}</style></head><body>' +
       '<div class="head"><div><h1>Stock List</h1><div class="muted">' + esc((cust && cust.name) || '') + '</div></div>' +
-      '<div style="text-align:right">' + companyHead() + '<br><span class="muted">' + new Date().toLocaleDateString('en-GB') + '</span></div></div>' +
+      '<div style="text-align:right">' + companyHead() + '<br><span class="muted">' + fmtDate(new Date().toISOString()) + '</span></div></div>' +
       '<table><thead><tr><th>Code</th><th>Batch</th><th>Description</th><th>Size (mm)</th><th style="text-align:right">PPP</th>' + binHead +
       '<th style="text-align:right">Total</th><th style="text-align:right">Avail m³</th><th style="text-align:right">£/m³</th></tr></thead><tbody>' +
       rows + '</tbody></table>' +
@@ -1256,7 +1260,9 @@
       '<option value="adjustment">Adjustment</option><option value="purchase">Goods in (purchase)</option>' +
       '<option value="sale">Goods out (sale)</option><option value="correction">Stock correction</option>' +
       '<option value="transfer">Transfer</option></select></div>' +
+      '<div class="field"><label for="adj-cost">Cost £/m³ (optional)</label><input id="adj-cost" type="number" step="any" placeholder="leave blank to use batch cost"></div>' +
       '</div><div class="field"><label for="adj-note">Note</label><input id="adj-note" type="text"></div>' +
+      '<p class="muted" style="margin-top:-4px;font-size:12px">A cost only applies when adding stock; it sets the value of the packs you add.</p>' +
       '<p class="form-note" id="modal-note"></p>' +
       '<div class="modal-foot"><button type="button" class="btn btn-ghost-dark btn-sm" data-cancel>Cancel</button>' +
       '<button type="submit" class="btn btn-primary btn-sm">Apply</button></div>';
@@ -1270,11 +1276,104 @@
         location_id: row.location_id,
         change: document.getElementById('adj-change').value,
         reason: document.getElementById('adj-reason').value,
+        unit_cost_per_m3: document.getElementById('adj-cost').value,
         note: document.getElementById('adj-note').value
       } }).then(function () { closeModal(); loadStock(); })
         .catch(function (err) { note.textContent = err.message; note.className = 'form-note err'; });
     };
     modal.hidden = false;
+  }
+
+  // ===================================================================
+  //  Stock movements ledger (Feature 5)
+  // ===================================================================
+  var REF_TYPE_LABEL = { loading_list: 'Loading list', delivery_note: 'Delivery note', picking_note: 'Picking note', purchase_order: 'Purchase order' };
+  function renderStockMovements() {
+    actionsEl.innerHTML = '';
+    view.innerHTML =
+      '<div class="toolbar" style="gap:8px;flex-wrap:wrap">' +
+        '<input id="sm-q" type="search" placeholder="Search code, batch, description, ref…" style="min-width:240px">' +
+        '<select id="sm-dir"><option value="">In &amp; out</option><option value="in">In only</option><option value="out">Out only</option></select>' +
+        '<label class="muted" style="font-size:12px">From <input id="sm-from" type="date"></label>' +
+        '<label class="muted" style="font-size:12px">To <input id="sm-to" type="date"></label>' +
+      '</div>' +
+      '<div id="sm-wrap"><p class="muted">Loading…</p></div>';
+    function load() {
+      var qs = [];
+      var q = document.getElementById('sm-q').value.trim();
+      var dir = document.getElementById('sm-dir').value;
+      var from = document.getElementById('sm-from').value, to = document.getElementById('sm-to').value;
+      if (q) qs.push('q=' + encodeURIComponent(q));
+      if (dir) qs.push('dir=' + dir);
+      if (from) qs.push('from=' + from);
+      if (to) qs.push('to=' + to);
+      Auth.api('/api/stock/movements' + (qs.length ? '?' + qs.join('&') : '')).then(function (d) {
+        var rows = d.rows || [];
+        var wrap = document.getElementById('sm-wrap');
+        if (!rows.length) { wrap.innerHTML = '<p class="muted">No stock movements match.</p>'; return; }
+        var body = rows.map(function (r) {
+          var into = Number(r.change) > 0;
+          var ref = r.note ? esc(r.note) : '—';
+          var refType = r.ref_type ? (REF_TYPE_LABEL[r.ref_type] || r.ref_type) : '';
+          return '<tr><td>' + fmtDate(r.created_at) + '</td>' +
+            '<td>' + esc(r.code || '—') + (r.batch_no ? ' <span class="muted">/ ' + esc(r.batch_no) + '</span>' : '') + '</td>' +
+            '<td>' + esc(r.description || '') + '</td>' +
+            '<td><span class="pill ' + (into ? 'st-green' : 'st-grey') + '">' + (into ? 'IN' : 'OUT') + '</span></td>' +
+            '<td style="text-align:right">' + (into ? '+' : '') + num(r.change) + '</td>' +
+            '<td>' + esc(r.reason || '') + '</td>' +
+            '<td>' + (refType ? '<span class="muted">' + esc(refType) + '</span> ' : '') + ref + '</td>' +
+            '<td>' + esc(r.location_name || '—') + '</td>' +
+            '<td class="muted">' + esc(r.user_name || '') + '</td></tr>';
+        }).join('');
+        wrap.innerHTML = '<table class="data-table"><thead><tr><th>Date</th><th>Code</th><th>Description</th><th>Dir</th>' +
+          '<th style="text-align:right">Packs</th><th>Reason</th><th>Reference</th><th>Location</th><th>By</th></tr></thead><tbody>' +
+          body + '</tbody></table>';
+      }).catch(showError);
+    }
+    var smTimer;
+    document.getElementById('sm-q').oninput = function () { clearTimeout(smTimer); smTimer = setTimeout(load, 250); };
+    document.getElementById('sm-dir').onchange = load;
+    document.getElementById('sm-from').onchange = load;
+    document.getElementById('sm-to').onchange = load;
+    load();
+  }
+
+  // ===================================================================
+  //  Stock reports — daily total stock value (Feature 7)
+  // ===================================================================
+  function renderStockReports() {
+    actionsEl.innerHTML = '<button class="btn btn-primary btn-sm" id="sr-capture">Capture today’s value</button>';
+    view.innerHTML = '<div id="sr-wrap"><p class="muted">Loading…</p></div>';
+    function load() {
+      Auth.api('/api/stock/snapshots').then(function (d) {
+        var rows = d.rows || [];
+        var wrap = document.getElementById('sr-wrap');
+        if (!rows.length) { wrap.innerHTML = '<p class="muted">No snapshots stored yet. A snapshot is captured automatically each night, or click “Capture today’s value”.</p>'; return; }
+        var latest = rows[0];
+        var prev = rows[1];
+        var delta = prev ? Number(latest.total_value) - Number(prev.total_value) : 0;
+        var body = rows.map(function (r) {
+          return '<tr><td>' + fmtDate(r.snapshot_date) + '</td>' +
+            '<td style="text-align:right">' + num(r.total_packs) + '</td>' +
+            '<td style="text-align:right">' + Number(r.total_volume_m3).toFixed(3) + '</td>' +
+            '<td style="text-align:right;font-weight:600">' + gbp(r.total_value) + '</td></tr>';
+        }).join('');
+        wrap.innerHTML =
+          '<div class="kpi-row" style="display:flex;gap:16px;margin-bottom:16px;flex-wrap:wrap">' +
+            '<div class="panel" style="flex:1;min-width:180px"><div class="muted">Latest stock value (' + fmtDate(latest.snapshot_date) + ')</div><div style="font-size:24px;font-weight:700">' + gbp(latest.total_value) + '</div>' +
+              (prev ? '<div class="muted" style="font-size:12px">' + (delta >= 0 ? '▲ +' : '▼ ') + gbp(Math.abs(delta)) + ' vs ' + fmtDate(prev.snapshot_date) + '</div>' : '') + '</div>' +
+            '<div class="panel" style="flex:1;min-width:180px"><div class="muted">Packs in stock</div><div style="font-size:24px;font-weight:700">' + num(latest.total_packs) + '</div></div>' +
+            '<div class="panel" style="flex:1;min-width:180px"><div class="muted">Volume m³</div><div style="font-size:24px;font-weight:700">' + Number(latest.total_volume_m3).toFixed(3) + '</div></div>' +
+          '</div>' +
+          '<div class="panel"><h3 class="sub-h">Daily history</h3>' +
+          '<table class="data-table"><thead><tr><th>Date</th><th style="text-align:right">Packs</th><th style="text-align:right">Volume m³</th><th style="text-align:right">Total value</th></tr></thead><tbody>' +
+          body + '</tbody></table></div>';
+      }).catch(showError);
+    }
+    document.getElementById('sr-capture').onclick = function () {
+      Auth.api('/api/stock/snapshots', { method: 'POST' }).then(load).catch(showError);
+    };
+    load();
   }
 
   // ===================================================================
@@ -1462,7 +1561,7 @@
       document.getElementById('o-customer').value = o.customer_id || '';
       document.getElementById('o-type').value = o.order_type || 'delivery';
       document.getElementById('o-ref').value = o.customer_ref || '';
-      document.getElementById('o-due').value = o.due_date || '';
+      document.getElementById('o-due').value = String(o.due_date || '').slice(0, 10);
       document.getElementById('o-loc').value = o.location_id || '';
       document.getElementById('o-vat').value = o.vat_rate != null ? Number(o.vat_rate) : 20;
       document.getElementById('o-dname').value = o.delivery_name || '';
@@ -1749,8 +1848,8 @@
           '<div class="panel"><h3 class="sub-h">Order</h3>' +
             kv('Status', statusPill(o.status)) + kv('Customer', esc(o.customer_name || '—')) +
             kv('Type', o.order_type === 'collect' ? 'Collect later' : 'Delivery') +
-            kv('Customer ref', esc(o.customer_ref || '—')) + kv('Order date', esc(o.order_date || '—')) +
-            kv('Due date', esc(o.due_date || '—')) + kv('Fulfil from', esc(o.location_name || '—')) +
+            kv('Customer ref', esc(o.customer_ref || '—')) + kv('Order date', fmtDate(o.order_date)) +
+            kv('Due date', fmtDate(o.due_date)) + kv('Fulfil from', esc(o.location_name || '—')) +
           '</div>' +
           '<div class="panel"><h3 class="sub-h">Delivery address</h3>' + (addr || '<span class="muted">—</span>') +
             (o.notes ? '<h3 class="sub-h" style="margin-top:18px">Notes</h3>' + esc(o.notes) : '') + '</div>' +
@@ -1809,10 +1908,10 @@
       '.totals{margin-top:20px;margin-left:auto;width:280px;font-size:14px}.totals div{display:flex;justify-content:space-between;padding:4px 0}' +
       '.totals .grand{border-top:2px solid #111;font-weight:700;margin-top:4px;padding-top:8px}</style></head><body>' +
       '<div class="head"><div><h1>Order Confirmation</h1><div class="muted">' + esc(o.number) + '</div>' +
-      '<div class="muted">Date: ' + esc(o.order_date || '') + '</div>' +
+      '<div class="muted">Date: ' + fmtDate(o.order_date) + '</div>' +
       (o.customer_ref ? '<div class="muted">Your ref: ' + esc(o.customer_ref) + '</div>' : '') + '</div>' +
       '<div style="text-align:right">' + companyHead() + '<br><span class="muted">' + esc(o.customer_name || '') + '</span>' +
-      (o.due_date ? '<br><span class="muted">Due: ' + esc(o.due_date) + '</span>' : '') + '</div></div>' +
+      (o.due_date ? '<br><span class="muted">Due: ' + fmtDate(o.due_date) + '</span>' : '') + '</div></div>' +
       '<p style="margin-top:14px"><strong>' + (o.order_type === 'collect' ? 'Collection' : 'Delivery') + ' address:</strong><br>' + (addr || '—') + '</p>' +
       '<table><thead><tr><th>Code</th><th>Description</th><th style="text-align:right">PPP</th><th style="text-align:right">Packs</th><th style="text-align:right">Volume m³</th><th style="text-align:right">£/m³</th><th style="text-align:right">Net</th></tr></thead><tbody>' + rows +
       '</tbody><tfoot><tr><td colspan="4" style="text-align:right;font-weight:700">Total volume m³</td><td style="text-align:right;font-weight:700">' + totalVol.toFixed(3) + '</td><td colspan="2"></td></tr></tfoot></table>' +
@@ -1979,13 +2078,14 @@
           '<td>' + esc(r.order_number || '—') + '</td>' +
           '<td>' + ho + '</td>' +
           '<td>' + esc(r.customer_name || '—') + '</td>' +
+          '<td>' + (r.order_type === 'collect' ? '<span class="pill st-amber">Collection</span>' : '<span class="pill st-blue">Delivery</span>') + '</td>' +
           '<td>' + esc(r.location_name || '—') + '</td>' +
           '<td>' + fmtDate(r.haulage_collection_date) + '</td>' +
           '<td>' + fmtDate(r.haulage_delivery_date) + '</td>' +
           '<td>' + fmtDate(r.order_due) + '</td>' +
           '<td>' + pickPill(r) + '</td></tr>';
       }).join('');
-      wrap.innerHTML = '<table class="data-table"><thead><tr><th>SPN</th><th>SO</th><th>HO</th><th>Customer</th><th>Depot</th><th>Collection</th><th>Delivery</th><th>SO due</th><th>Status</th></tr></thead><tbody>' + body + '</tbody></table>';
+      wrap.innerHTML = '<table class="data-table"><thead><tr><th>SPN</th><th>SO</th><th>HO</th><th>Customer</th><th>Type</th><th>Depot</th><th>Collection</th><th>Delivery</th><th>SO due</th><th>Status</th></tr></thead><tbody>' + body + '</tbody></table>';
       wrap.querySelectorAll('[data-go]').forEach(function (tr) { tr.onclick = function () { location.hash = tr.dataset.go; }; });
       wrap.querySelectorAll('.ho-link').forEach(function (a) { a.onclick = function (e) { e.stopPropagation(); }; });
     }).catch(showError);
@@ -2023,13 +2123,14 @@
       }).join('');
 
       var haulKv = p.haulage_number
-        ? kv('Delivery date', esc(p.haulage_delivery_date || '—')) +
+        ? kv('Delivery date', fmtDate(p.haulage_delivery_date)) +
           kv('Haulage', '<a href="#haulage/' + p.haulage_id + '">' + esc(p.haulage_number) + '</a>')
         : '';
       view.innerHTML =
         '<div class="detail-grid"><div class="panel"><h3 class="sub-h">Picking note</h3>' +
           kv('Status', pickPill(p)) + kv(p.order_numbers && p.order_numbers.indexOf(',') >= 0 ? 'Orders' : 'Order', esc(p.order_numbers || p.order_number || '—')) +
-          kv('Customer', esc(p.customer_name || '—')) + kv('Pick from', esc(p.location_name || '—')) + haulKv +
+          kv('Customer', esc(p.customer_name || '—')) + kv('Fulfilment', p.order_type === 'collect' ? '<strong>Collection</strong>' : '<strong>Delivery</strong>') +
+          kv('Pick from', esc(p.location_name || '—')) + haulKv +
         '</div><div class="panel"><h3 class="sub-h">Deliver to</h3>' +
           ([p.delivery_name, p.delivery_address, p.delivery_city, p.delivery_postcode].filter(Boolean).map(esc).join('<br>') || '<span class="muted">—</span>') +
         '</div></div>' +
@@ -2114,9 +2215,9 @@
       'th{background:#f0f0f0}.head{display:flex;justify-content:space-between}.box{margin-top:10px}' +
       '.instr{margin-top:14px;padding:10px 12px;border:1px solid #111;background:#f7f7f7;white-space:pre-wrap;font-weight:600}</style></head><body>' +
       '<div class="head"><div><h1>Picking Note</h1><div class="muted">' + esc(p.number) + '</div></div>' +
-      '<div style="text-align:right">' + companyHead() + '<br><span class="muted">Pick from: ' + esc(p.location_name || '') + '</span></div></div>' +
+      '<div style="text-align:right">' + companyHead() + '<br><span class="muted">Pick from: ' + esc(p.location_name || '') + '</span><br><span class="muted" style="font-weight:700">' + (p.order_type === 'collect' ? 'FOR COLLECTION' : 'FOR DELIVERY') + '</span></div></div>' +
       (p.instructions ? '<div class="instr">' + esc(p.instructions) + '</div>' : '') +
-      '<div class="box"><strong>Order:</strong> ' + esc(p.order_number || '') + ' &nbsp; <strong>Customer:</strong> ' + esc(p.customer_name || '') + '</div>' +
+      '<div class="box"><strong>Order:</strong> ' + esc(p.order_number || '') + ' &nbsp; <strong>Customer:</strong> ' + esc(p.customer_name || '') + ' &nbsp; <strong>Type:</strong> ' + (p.order_type === 'collect' ? 'Collection' : 'Delivery') + '</div>' +
       '<div class="box"><strong>Deliver to:</strong><br>' + (deliver || '—') + '</div>' +
       '<table><thead><tr><th>Code</th><th>Description</th><th style="text-align:right">Qty to pick</th><th style="text-align:right">Volume m³</th><th>Picked ✓</th></tr></thead><tbody>' + rows +
       '</tbody><tfoot><tr><td colspan="3" style="text-align:right;font-weight:700">Total volume m³</td><td style="text-align:right;font-weight:700">' + totalVol.toFixed(3) + '</td><td></td></tr></tfoot></table>' +
@@ -2203,7 +2304,7 @@
         '<div class="detail-grid"><div class="panel"><h3 class="sub-h">Delivery note</h3>' +
           kv('Status', delPill(n.status)) + kv('Order', esc(n.order_number || '—')) +
           kv('Customer', esc(n.customer_name || '—')) + kv('Picking note', esc(n.picking_number || '—')) +
-          kv('Delivered', esc(n.delivered_date || '—')) +
+          kv('Delivered', fmtDate(n.delivered_date)) +
         '</div><div class="panel"><h3 class="sub-h">Collect from</h3>' + (coll || '<span class="muted">—</span>') +
           '<h3 class="sub-h" style="margin-top:18px">Deliver to</h3>' + (del || '<span class="muted">—</span>') +
         '</div></div>' +
@@ -2343,7 +2444,11 @@
         : '';
       view.innerHTML =
         '<div class="detail-grid"><div class="panel"><h3 class="sub-h">Invoice</h3>' +
-          kv('Status', invPill(inv.status)) + kv('Date', esc(inv.invoice_date || '—')) + kv('Due', esc(inv.due_date || '—')) +
+          kv('Status', invPill(inv.status)) +
+          kv('Date', inv.status === 'draft'
+            ? '<input id="i-date" type="date" value="' + esc(String(inv.invoice_date || '').slice(0, 10)) + '" style="padding:2px 6px"> <button class="link-btn" id="i-date-save">Save</button>'
+            : fmtDate(inv.invoice_date)) +
+          kv('Due', fmtDate(inv.due_date)) +
           kv('Order', esc(inv.order_number || '—')) + kv('Delivery', esc(inv.delivery_number || '—')) +
           kv('Customer ref', esc(inv.customer_ref || '—')) +
           kv('Paid', gbp(inv.amount_paid || 0)) + kv('Outstanding', '<strong>' + gbp(inv.outstanding || 0) + '</strong>') +
@@ -2361,6 +2466,12 @@
           '</tfoot></table></div>';
 
       document.getElementById('i-print').onclick = function () { printInvoice(inv, lines); };
+      var dateSave = document.getElementById('i-date-save');
+      if (dateSave) dateSave.onclick = function () {
+        var v = document.getElementById('i-date').value;
+        if (!v) { showError(new Error('Choose an invoice date.')); return; }
+        Auth.api('/api/invoices/' + id, { method: 'PATCH', body: { invoice_date: v } }).then(function () { renderInvoiceDetail(id); }).catch(showError);
+      };
       function setStatus(s) { Auth.api('/api/invoices/' + id, { method: 'PATCH', body: { status: s } }).then(function () { renderInvoiceDetail(id); }).catch(showError); }
       var issue = document.getElementById('i-issue'); if (issue) issue.onclick = function () { setStatus('issued'); };
       var pay = document.getElementById('i-pay'); if (pay) pay.onclick = function () { openReceipt(inv.customer_id, inv.customer_name, function () { renderInvoiceDetail(id); }, inv.id); };
@@ -2394,7 +2505,7 @@
       '.totals{margin-top:20px;margin-left:auto;width:280px;font-size:14px}.totals div{display:flex;justify-content:space-between;padding:4px 0}' +
       '.totals .grand{border-top:2px solid #111;font-weight:700;margin-top:4px;padding-top:8px}</style></head><body>' +
       '<div class="head"><div><h1>Invoice</h1><div class="muted">' + esc(inv.number) + '</div>' +
-      '<div class="muted">Date: ' + esc(inv.invoice_date || '') + '</div></div>' +
+      '<div class="muted">Date: ' + fmtDate(inv.invoice_date) + '</div></div>' +
       '<div style="text-align:right">' + companyHead() + '<br><span class="muted">Order: ' + esc(inv.order_number || '') +
       (inv.delivery_number ? '<br>Delivery: ' + esc(inv.delivery_number) : '') + '</span></div></div>' +
       '<p style="margin-top:14px"><strong>Bill to:</strong><br>' + (bill || '—') + '</p>' +
@@ -2455,7 +2566,7 @@
       var terms = (c.credit_terms_days != null ? c.credit_terms_days + ' days' : '—') + (c.credit_terms_eom ? ' EOM' : '');
       var invRows = invs.map(function (i) {
         return '<tr data-go="#invoices/' + i.id + '" class="row-link"><td>' + esc(i.number || '—') + '</td>' +
-          '<td>' + esc(i.invoice_date || '') + '</td><td>' + esc(i.due_date || '—') + '</td>' +
+          '<td>' + fmtDate(i.invoice_date) + '</td><td>' + fmtDate(i.due_date) + '</td>' +
           '<td>' + invPill(i.status) + '</td>' +
           '<td style="text-align:right">' + gbp(i.gross) + '</td><td style="text-align:right">' + gbp(i.amount_paid) + '</td>' +
           '<td style="text-align:right">' + gbp(i.outstanding) + '</td>' +
@@ -2486,7 +2597,7 @@
 
   function printStatement(c, invs, pays, outstanding) {
     var invRows = invs.map(function (i) {
-      return '<tr><td>' + esc(i.number || '') + '</td><td>' + esc(i.invoice_date || '') + '</td><td>' + esc(i.due_date || '') + '</td>' +
+      return '<tr><td>' + esc(i.number || '') + '</td><td>' + fmtDate(i.invoice_date) + '</td><td>' + fmtDate(i.due_date) + '</td>' +
         '<td style="text-align:right">' + gbp(i.gross) + '</td><td style="text-align:right">' + gbp(i.amount_paid) + '</td><td style="text-align:right">' + gbp(i.outstanding) + '</td></tr>';
     }).join('');
     var html = '<html><head><title>Statement</title><style>' +
@@ -2496,7 +2607,7 @@
       '.bal{margin-top:16px;text-align:right;font-size:15px;font-weight:700}</style></head><body>' +
       '<div class="head"><div><h1>Statement of Account</h1><div class="muted">' + esc(c.name || '') + '</div>' +
       '<div class="muted">' + [c.address, c.city, c.postcode].filter(Boolean).map(esc).join(', ') + '</div></div>' +
-      '<div style="text-align:right">' + companyHead() + '<br><span class="muted">' + new Date().toLocaleDateString('en-GB') + '</span></div></div>' +
+      '<div style="text-align:right">' + companyHead() + '<br><span class="muted">' + fmtDate(new Date().toISOString()) + '</span></div></div>' +
       '<table><thead><tr><th>Invoice</th><th>Date</th><th>Due</th><th style="text-align:right">Gross</th><th style="text-align:right">Paid</th><th style="text-align:right">Outstanding</th></tr></thead><tbody>' + invRows + '</tbody></table>' +
       '<div class="bal">Balance due: ' + gbp(outstanding) + '</div>' +
       companyFooter() +
@@ -2514,7 +2625,7 @@
     Auth.api('/api/invoices?customer_id=' + customerId).then(function (d) {
       var open = (d.rows || []).filter(function (i) { return (i.status === 'issued' || i.status === 'part_paid') && Number(i.outstanding) > 0.005; });
       var invRows = open.map(function (i) {
-        return '<tr><td>' + esc(i.number) + '</td><td>' + esc(i.due_date || '—') + '</td>' +
+        return '<tr><td>' + esc(i.number) + '</td><td>' + fmtDate(i.due_date) + '</td>' +
           '<td style="text-align:right">' + gbp(i.outstanding) + '</td>' +
           '<td><input type="number" step="any" min="0" class="rc-alloc" data-id="' + i.id + '" data-out="' + Number(i.outstanding) + '" style="width:100px" value="' + (prefillInvoiceId && String(prefillInvoiceId) === String(i.id) ? Number(i.outstanding) : '') + '"></td></tr>';
       }).join('');
@@ -2633,7 +2744,7 @@
       view.innerHTML =
         '<div class="detail-grid"><div class="panel"><h3 class="sub-h">Haulage order</h3>' +
           kv('Status', haulPill(h.status)) + kv('Haulier', esc(h.haulier_name || '—')) +
-          kv('Collection', esc(h.collection_date || '—')) + kv('Delivery', esc(h.delivery_date || '—')) +
+          kv('Collection', fmtDate(h.collection_date)) + kv('Delivery', fmtDate(h.delivery_date)) +
           kv('Drops', drops.length) +
         '</div><div class="panel"><h3 class="sub-h">Haulier contact</h3>' +
           ([h.haulier_contact, h.haulier_phone, h.haulier_email].filter(Boolean).map(esc).join('<br>') || '<span class="muted">—</span>') +
@@ -2679,8 +2790,8 @@
     view.innerHTML =
       '<div class="panel"><div class="fields form-grid">' +
         field('Haulier *', '<select id="h-haulier">' + haulOpts + '</select>') +
-        field('Collection date *', '<input id="h-cdate" type="date" value="' + (h && h.collection_date ? esc(h.collection_date) : '') + '">') +
-        field('Delivery date *', '<input id="h-ddate" type="date" value="' + (h && h.delivery_date ? esc(h.delivery_date) : '') + '">') +
+        field('Collection date *', '<input id="h-cdate" type="date" value="' + esc(String(h && h.collection_date || '').slice(0, 10)) + '">') +
+        field('Delivery date *', '<input id="h-ddate" type="date" value="' + esc(String(h && h.delivery_date || '').slice(0, 10)) + '">') +
         field('VAT rate %', '<input id="h-vat" type="number" step="any" value="' + (h && h.vat_rate != null ? Number(h.vat_rate) : 20) + '">') +
       '</div>' +
       '<div class="field"><label>Instructions (shown at top of paperwork)</label><textarea id="h-instructions" rows="2">' + (h ? esc(h.instructions || '') : '') + '</textarea></div>' +
@@ -2816,8 +2927,8 @@
       '.instr{margin-top:14px;padding:10px 12px;border:1px solid #111;background:#f7f7f7;white-space:pre-wrap;font-weight:600}</style></head><body>' +
       '<div class="head"><div><h1>Haulage Order</h1><div class="muted">' + esc(h.number) + '</div></div>' +
       '<div style="text-align:right">' + companyHead() + '<br><span class="muted">Haulier: ' + esc(h.haulier_name || '') + '</span>' +
-      (h.collection_date ? '<br><span class="muted">Collection: ' + esc(h.collection_date) + '</span>' : '') +
-      (h.delivery_date ? '<br><span class="muted">Delivery: ' + esc(h.delivery_date) + '</span>' : '') + '</div></div>' +
+      (h.collection_date ? '<br><span class="muted">Collection: ' + fmtDate(h.collection_date) + '</span>' : '') +
+      (h.delivery_date ? '<br><span class="muted">Delivery: ' + fmtDate(h.delivery_date) + '</span>' : '') + '</div></div>' +
       (h.instructions ? '<div class="instr">' + esc(h.instructions) + '</div>' : '') +
       ((h.haulier_contact || h.haulier_email || h.haulier_phone) ? '<p class="muted">' + [h.haulier_contact, h.haulier_phone, h.haulier_email].filter(Boolean).map(esc).join(' · ') + '</p>' : '') +
       dropHtml +
@@ -2910,8 +3021,8 @@
       view.innerHTML =
         '<div class="detail-grid"><div class="panel"><h3 class="sub-h">Purchase order</h3>' +
           kv('Status', poPill(o.status)) + kv('Supplier', esc(o.supplier_name || '—')) +
-          kv('Supplier ref', esc(o.supplier_ref || '—')) + kv('Order date', esc(o.order_date || '—')) +
-          kv('Expected', esc(o.expected_date || '—')) +
+          kv('Supplier ref', esc(o.supplier_ref || '—')) + kv('Order date', fmtDate(o.order_date)) +
+          kv('Expected', fmtDate(o.expected_date)) +
         '</div><div class="panel"><h3 class="sub-h">Supplier</h3>' +
           ([o.supplier_contact, o.supplier_email, o.supplier_address, o.supplier_city, o.supplier_postcode].filter(Boolean).map(esc).join('<br>') || '<span class="muted">—</span>') +
           (o.notes ? '<h3 class="sub-h" style="margin-top:18px">Notes</h3>' + esc(o.notes) : '') +
@@ -3065,7 +3176,7 @@
       '<div class="head"><div><h1>Purchase Order</h1><div class="muted">' + esc(o.number) + '</div>' +
       (o.supplier_ref ? '<div class="muted">Ref: ' + esc(o.supplier_ref) + '</div>' : '') + '</div>' +
       '<div style="text-align:right">' + companyHead() + '<br><span class="muted">Supplier: ' + esc(o.supplier_name || '') + '</span>' +
-      (o.expected_date ? '<br><span class="muted">Expected: ' + esc(o.expected_date) + '</span>' : '') + '</div></div>' +
+      (o.expected_date ? '<br><span class="muted">Expected: ' + fmtDate(o.expected_date) + '</span>' : '') + '</div></div>' +
       '<table><thead><tr><th>Code</th><th>Batch</th><th>Size (mm)</th><th style="text-align:right">Qty packs</th><th style="text-align:right">Volume m³</th><th style="text-align:right">Cost/m³</th><th style="text-align:right">Value</th></tr></thead><tbody>' + rows + '</tbody></table>' +
       '<div class="totals">Total (' + cur + '): ' + cm(total) + '</div>' +
       (o.notes ? '<p class="muted" style="margin-top:24px">' + esc(o.notes) + '</p>' : '') +
@@ -3132,7 +3243,15 @@
         (ll.status === 'open' ? '<button class="btn btn-ghost-dark btn-sm danger" id="ll-del">Delete</button> ' : '') +
         '<a class="btn btn-ghost-dark btn-sm" href="#loading">Back</a>';
 
+      var editable = ll.status === 'open';
       var rows = lines.map(function (l) {
+        if (editable) {
+          return '<tr><td>' + esc(l.code || '—') + '</td><td>' + esc(l.batch_no || '—') + '</td>' +
+            '<td>' + esc(l.po_number || '—') + '</td>' +
+            '<td><input type="number" step="any" min="0" class="ll-qty" data-id="' + l.id + '" value="' + num(l.quantity) + '" style="width:90px"></td>' +
+            '<td><input type="number" step="any" min="0" class="ll-cost" data-id="' + l.id + '" value="' + (l.cost_per_m3 != null ? Number(l.cost_per_m3) : '') + '" style="width:90px"></td>' +
+            '<td><button type="button" class="link-btn danger ll-rm" data-id="' + l.id + '">Remove</button></td></tr>';
+        }
         return '<tr><td>' + esc(l.code || '—') + '</td><td>' + esc(l.batch_no || '—') + '</td>' +
           '<td>' + esc(l.po_number || '—') + '</td>' +
           '<td>' + num(l.quantity) + '</td><td>' + (l.cost_per_m3 != null ? Number(l.cost_per_m3).toFixed(2) : '—') + '</td></tr>';
@@ -3141,18 +3260,41 @@
       view.innerHTML =
         '<div class="detail-grid"><div class="panel"><h3 class="sub-h">Voyage</h3>' +
           kv('Status', loadPill(ll.status)) + kv('Vessel', esc(ll.vessel_name || '—')) +
-          kv('Voyage ref', esc(ll.voyage_ref || '—')) + kv('Loaded', esc(ll.load_date || '—')) +
-          kv('ETA', esc(ll.eta_date || '—')) + kv('Transit bin', esc(ll.location_name || '—')) +
+          kv('Voyage ref', esc(ll.voyage_ref || '—')) + kv('Loaded', fmtDate(ll.load_date)) +
+          kv('ETA', fmtDate(ll.eta_date)) + kv('Transit bin', esc(ll.location_name || '—')) +
         '</div><div class="panel"><h3 class="sub-h">Costing</h3>' +
           kv('Exchange € per £', ll.exchange_rate != null ? Number(ll.exchange_rate).toFixed(4) : '—') +
           kv('Freight £/m³', ll.freight_rate != null ? gbp(ll.freight_rate) : '—') +
           (ll.notes ? '<h3 class="sub-h" style="margin-top:18px">Notes</h3>' + esc(ll.notes) : '') +
         '</div></div>' +
         '<div class="panel" style="margin-top:18px"><h3 class="sub-h">Loaded from purchase orders</h3>' +
-          '<table class="data-table"><thead><tr><th>Code</th><th>Batch</th><th>PO</th><th>Qty packs</th><th>Cost/m³</th></tr></thead><tbody>' +
-          (rows || '<tr><td colspan="5" class="muted">No lines.</td></tr>') + '</tbody></table></div>';
+          '<table class="data-table"><thead><tr><th>Code</th><th>Batch</th><th>PO</th><th>Qty packs</th><th>Cost/m³</th>' + (editable ? '<th></th>' : '') + '</tr></thead><tbody>' +
+          (rows || '<tr><td colspan="' + (editable ? 6 : 5) + '" class="muted">No lines.</td></tr>') + '</tbody></table>' +
+          (editable ? '<div style="margin-top:10px"><button class="btn btn-primary btn-sm" id="ll-save-lines">Save line changes</button> <span class="muted" style="font-size:12px">Edit quantities/costs or remove lines before confirming loaded.</span></div>' : '') +
+        '</div>';
 
       document.getElementById('ll-print').onclick = function () { printLoading(ll, lines); };
+      var saveLines = document.getElementById('ll-save-lines');
+      if (saveLines) saveLines.onclick = function () {
+        var payload = [];
+        var removed = {};
+        view.querySelectorAll('.ll-rm.is-removed').forEach(function (b) { removed[b.dataset.id] = true; payload.push({ id: b.dataset.id, remove: true }); });
+        view.querySelectorAll('.ll-qty').forEach(function (inp) {
+          if (removed[inp.dataset.id]) return;
+          var cost = view.querySelector('.ll-cost[data-id="' + inp.dataset.id + '"]');
+          payload.push({ id: inp.dataset.id, quantity: inp.value, cost_per_m3: cost ? cost.value : null });
+        });
+        Auth.api('/api/loading/' + id, { method: 'PATCH', body: { lines: payload } })
+          .then(function () { renderLoadingDetail(id); }).catch(showError);
+      };
+      view.querySelectorAll('.ll-rm').forEach(function (b) {
+        b.onclick = function () {
+          var tr = b.closest('tr');
+          b.classList.toggle('is-removed');
+          if (b.classList.contains('is-removed')) { tr.style.opacity = '0.4'; b.textContent = 'Undo'; }
+          else { tr.style.opacity = ''; b.textContent = 'Remove'; }
+        };
+      });
       var lo = document.getElementById('ll-load'); if (lo) lo.onclick = function () { openLoadConfirm(ll); };
       var ar = document.getElementById('ll-arrive'); if (ar) ar.onclick = function () { openArrive(ll, lines); };
       var dl = document.getElementById('ll-del'); if (dl) dl.onclick = function () {
@@ -3166,7 +3308,7 @@
     modalForm.innerHTML =
       '<p class="muted">Loading creates the transit stock bin for this voyage and draws the quantities from the purchase order(s).</p>' +
       '<div class="fields form-grid">' +
-      '<div class="field"><label>Load date</label><input id="lc-date" type="date" value="' + esc(ll.load_date || '') + '"></div>' +
+      '<div class="field"><label>Load date</label><input id="lc-date" type="date" value="' + esc(String(ll.load_date || '').slice(0, 10)) + '"></div>' +
       '<div class="field"><label>Exchange rate € per £ *</label><input id="lc-rate" type="number" step="any" min="0" placeholder="e.g. 1.15"></div>' +
       '</div><p class="form-note" id="modal-note"></p>' +
       '<div class="modal-foot"><button type="button" class="btn btn-ghost-dark btn-sm" data-cancel>Cancel</button>' +
@@ -3299,7 +3441,7 @@
       '.head{display:flex;justify-content:space-between}</style></head><body>' +
       '<div class="head"><div><h1>Loading List</h1><div class="muted">' + esc(ll.number) + '</div></div>' +
       '<div style="text-align:right">' + companyHead() + '<br><span class="muted">Vessel: ' + esc(ll.vessel_name || '') +
-      (ll.voyage_ref ? ' · ' + esc(ll.voyage_ref) : '') + '</span>' + (ll.eta_date ? '<br><span class="muted">ETA: ' + esc(ll.eta_date) + '</span>' : '') + '</div></div>' +
+      (ll.voyage_ref ? ' · ' + esc(ll.voyage_ref) : '') + '</span>' + (ll.eta_date ? '<br><span class="muted">ETA: ' + fmtDate(ll.eta_date) + '</span>' : '') + '</div></div>' +
       '<table><thead><tr><th>Code</th><th>Description</th><th>PO</th><th style="text-align:right">Qty packs</th></tr></thead><tbody>' + rows + '</tbody></table>' +
       '</body></html>';
     var w = window.open('', '_blank');
@@ -3427,7 +3569,7 @@
     var foot = d.totals ? '<tfoot><tr>' + cols.map(function (c) { var v = d.totals[c.key]; return '<td><strong>' + (v != null ? fmtCell(v, c.fmt) : '') + '</strong></td>'; }).join('') + '</tr></tfoot>' : '';
     var html = '<html><head><title>' + esc(title) + '</title><style>body{font-family:Arial,sans-serif;margin:32px;color:#111}h1{margin:0 0 4px}table{width:100%;border-collapse:collapse;margin-top:16px}th,td{border:1px solid #ccc;padding:7px;font-size:13px;text-align:left}th{background:#f0f0f0}</style></head><body>' +
       '<div style="display:flex;justify-content:space-between;border-bottom:2px solid #111;padding-bottom:8px"><h1>' + esc(title) + '</h1>' +
-      '<div style="text-align:right">' + companyHead() + '<br><span class="muted">' + new Date().toLocaleDateString('en-GB') + '</span></div></div>' +
+      '<div style="text-align:right">' + companyHead() + '<br><span class="muted">' + fmtDate(new Date().toISOString()) + '</span></div></div>' +
       '<table><thead><tr>' + head + '</tr></thead><tbody>' + body + '</tbody>' + foot + '</table></body></html>';
     var w = window.open('', '_blank');
     if (!w) { alert('Allow pop-ups to print.'); return; }

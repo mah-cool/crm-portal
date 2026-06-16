@@ -65,6 +65,7 @@ export default async function handler(req, res) {
       case 'loading': return await loading(req, res, b, c);
       case 'haulage': return await haulage(req, res, b, c);
       case 'addresses': return await addresses(req, res, b);
+      case 'cron':    return await cron(req, res, b);
       default:        return send(res, 404, { error: 'Unknown endpoint.' });
     }
   } catch (err) {
@@ -170,6 +171,45 @@ async function stock(req, res, sub) {
   const session = await requireUser(req, res);
   if (!session) return;
 
+  // ---- Feature 5: stock movements ledger -----------------------------
+  if (sub === 'movements') {
+    if (req.method !== 'GET') return send(res, 405, { error: 'Method not allowed' });
+    const q = (req.query.q || '').toLowerCase().trim();
+    const like = '%' + q + '%';
+    const dir = req.query.dir || '';   // 'in' | 'out' | ''
+    const from = req.query.from || null, to = req.query.to || null;
+    const rows = await sql`
+      select m.id, m.created_at, m.change, m.reason, m.ref_type, m.ref_id, m.note,
+             m.unit_cost_per_m3, v.code, v.batch_no, v.description,
+             l.name as location_name, u.name as user_name
+      from stock_movements m
+      left join batch_view v on v.id = m.batch_id
+      left join locations l on l.id = m.location_id
+      left join users u on u.id = m.created_by
+      where (${q} = '' or lower(coalesce(v.code,'')) like ${like}
+             or lower(coalesce(v.batch_no,'')) like ${like}
+             or lower(coalesce(v.description,'')) like ${like}
+             or lower(coalesce(m.note,'')) like ${like})
+        and (${dir} = '' or (${dir} = 'in' and m.change > 0) or (${dir} = 'out' and m.change < 0))
+        and (${from}::date is null or m.created_at >= ${from}::date)
+        and (${to}::date is null or m.created_at < (${to}::date + 1))
+      order by m.created_at desc, m.id desc limit 2000`;
+    return send(res, 200, { rows });
+  }
+
+  // ---- Feature 7: stored daily stock-value snapshots -----------------
+  if (sub === 'snapshots') {
+    if (req.method === 'POST') {   // capture today's value on demand
+      const snap = await captureStockSnapshot();
+      return send(res, 200, { snapshot: snap });
+    }
+    if (req.method !== 'GET') return send(res, 405, { error: 'Method not allowed' });
+    const rows = await sql`
+      select snapshot_date, total_packs, total_volume_m3, total_value, created_at
+      from stock_value_snapshots order by snapshot_date desc limit 730`;
+    return send(res, 200, { rows });
+  }
+
   if (sub === 'adjust') {
     if (req.method !== 'POST') return send(res, 405, { error: 'Method not allowed' });
     const body = await readJson(req);
@@ -179,10 +219,13 @@ async function stock(req, res, sub) {
     if (!Number.isInteger(batchId) || batchId <= 0) return send(res, 400, { error: 'Invalid batch.' });
     if (!Number.isInteger(locationId) || locationId <= 0) return send(res, 400, { error: 'Choose a location.' });
     if (!Number.isFinite(change) || change === 0) return send(res, 400, { error: 'Enter a non-zero number of packs.' });
+    // Optional manual £/m³ cost — overrides the batch's landed cost when adding stock.
+    const manualCost = body.unit_cost_per_m3 != null && body.unit_cost_per_m3 !== '' ? Number(body.unit_cost_per_m3) : null;
+    if (manualCost != null && (!Number.isFinite(manualCost) || manualCost < 0)) return send(res, 400, { error: 'Enter a valid cost per m³.' });
 
-    await sql`insert into stock_movements (batch_id, location_id, change, reason, note, created_by)
-              values (${batchId}, ${locationId}, ${change}, ${reason}, ${note}, ${Number(session.sub)})`;
-    if (change > 0) await addStockWeighted(batchId, locationId, change, await batchLandedCost(batchId));
+    await sql`insert into stock_movements (batch_id, location_id, change, reason, note, unit_cost_per_m3, created_by)
+              values (${batchId}, ${locationId}, ${change}, ${reason}, ${note}, ${manualCost}, ${Number(session.sub)})`;
+    if (change > 0) await addStockWeighted(batchId, locationId, change, manualCost != null ? manualCost : await batchLandedCost(batchId));
     else await removeStockPacks(batchId, locationId, -change);
     const rows = await sql`select packs, volume_m3 from stock_levels where batch_id = ${batchId} and location_id = ${locationId}`;
     return rows.length ? send(res, 200, { packs: rows[0].packs, volume_m3: rows[0].volume_m3 })
@@ -209,6 +252,41 @@ async function stock(req, res, sub) {
       and (${locId}::bigint is null or sl.location_id = ${locId})
     order by v.code, v.batch_no, l.name limit 2000`;
   return send(res, 200, { rows });
+}
+
+// Compute the current total stock value and upsert today's snapshot.
+// Value per stock row = volume_m3 × avg_cost_per_m3 (same basis as the stock list).
+async function captureStockSnapshot() {
+  const rows = await sql`
+    select coalesce(sum(packs),0) as packs,
+           coalesce(sum(volume_m3),0) as volume,
+           coalesce(sum(coalesce(volume_m3,0) * coalesce(avg_cost_per_m3,0)),0) as value
+    from stock_levels`;
+  const t = rows[0] || { packs: 0, volume: 0, value: 0 };
+  const out = await sql`
+    insert into stock_value_snapshots (snapshot_date, total_packs, total_volume_m3, total_value)
+    values (current_date, ${t.packs}, ${t.volume}, ${t.value})
+    on conflict (snapshot_date) do update
+      set total_packs = excluded.total_packs,
+          total_volume_m3 = excluded.total_volume_m3,
+          total_value = excluded.total_value,
+          created_at = now()
+    returning snapshot_date, total_packs, total_volume_m3, total_value`;
+  return out[0];
+}
+
+/* ------------------------------ cron ------------------------------ */
+// Hit by Vercel Cron (see vercel.json). Vercel sends a bearer token equal to
+// CRON_SECRET; we reject anything else so the route can't be triggered openly.
+async function cron(req, res, job) {
+  const secret = process.env.CRON_SECRET;
+  const auth = req.headers.authorization || '';
+  if (!secret || auth !== `Bearer ${secret}`) return send(res, 401, { error: 'Unauthorized.' });
+  if (job === 'stock-snapshot') {
+    const snap = await captureStockSnapshot();
+    return send(res, 200, { ok: true, snapshot: snap });
+  }
+  return send(res, 404, { error: 'Unknown job.' });
 }
 
 /* ------------------------------ users ----------------------------- */
@@ -642,7 +720,7 @@ async function picking(req, res, id, action) {
     const like = '%' + q + '%';
     const rows = await sql`
       select pn.id, pn.number, pn.status, pn.created_at,
-             o.number as order_number, o.due_date as order_due, c.name as customer_name, l.name as location_name,
+             o.number as order_number, o.order_type, o.due_date as order_due, c.name as customer_name, l.name as location_name,
              (select count(*) from picking_note_lines pl where pl.picking_note_id = pn.id) as line_count,
              (select count(*) from delivery_notes dn where dn.picking_note_id = pn.id and dn.status <> 'cancelled') as delivery_count,
              (select ho.id from haulage_order_drops d join haulage_orders ho on ho.id = d.haulage_order_id
@@ -706,7 +784,7 @@ async function picking(req, res, id, action) {
 
   if (req.method === 'GET') {
     const head = await sql`
-      select pn.*, o.number as order_number, o.customer_id, c.name as customer_name,
+      select pn.*, o.number as order_number, o.customer_id, o.order_type, c.name as customer_name,
              o.delivery_name, o.delivery_address, o.delivery_city, o.delivery_postcode, l.name as location_name,
              (select string_agg(distinct o2.number, ', ') from picking_note_lines pl
               join sales_order_lines sl on sl.id = pl.order_line_id
@@ -766,10 +844,33 @@ async function picking(req, res, id, action) {
       const overrides = {};
       if (Array.isArray(bdy.lines)) bdy.lines.forEach(l => { overrides[String(l.id)] = Number(l.qty_picked); });
 
+      // Resolve the quantity each line will pick, then guard against picking
+      // more than is physically available (packs - already-allocated) per batch
+      // at this location. Stock physically leaves at delivery, but we refuse to
+      // reserve what we don't hold — you can't deliver a pack we don't have.
+      const picks = [];
+      const needByBatch = {};
       for (const line of lines) {
         let picked = overrides[String(line.id)];
         if (picked == null || !Number.isFinite(picked)) picked = Number(line.qty_to_pick);
         if (picked < 0) picked = 0;
+        picks.push({ line, picked });
+        if (picked > 0 && line.batch_id) needByBatch[line.batch_id] = (needByBatch[line.batch_id] || 0) + picked;
+      }
+      for (const batchId of Object.keys(needByBatch)) {
+        const need = needByBatch[batchId];
+        const avRows = await sql`
+          select coalesce(packs,0) - coalesce(allocated_packs,0) as available
+          from stock_levels where batch_id = ${Number(batchId)} and location_id = ${locationId}`;
+        const available = avRows.length ? Number(avRows[0].available) : 0;
+        if (need > available + 1e-9) {
+          const info = await sql`select code, batch_no from batch_view where id = ${Number(batchId)}`;
+          const label = info.length ? `${info[0].code || ''}${info[0].batch_no ? ' / ' + info[0].batch_no : ''}`.trim() : `batch ${batchId}`;
+          return send(res, 400, { error: `Not enough stock to pick ${label}: need ${need}, only ${available} available at this location.` });
+        }
+      }
+
+      for (const { line, picked } of picks) {
         if (picked === 0) continue;
 
         await sql`update picking_note_lines set qty_picked = ${picked} where id = ${line.id}`;
@@ -1846,6 +1947,19 @@ async function loading(req, res, id, action) {
       }
       await sql`update loading_lists set status = 'arrived' where id = ${nid}`;
       // "On the water" is permanent — never deactivated.
+      return send(res, 200, { ok: true });
+    }
+
+    // Edit lines on an open (not yet loaded) loading list: change qty / cost,
+    // or remove lines. Nothing has hit stock yet, so this is just data.
+    if (Array.isArray(bdy.lines)) {
+      if (ll.status !== 'open') return send(res, 400, { error: 'Only open loading lists can be edited.' });
+      for (const l of bdy.lines) {
+        if (!l || !l.id) continue;
+        if (l.remove) { await sql`delete from loading_list_lines where id = ${Number(l.id)} and loading_list_id = ${nid}`; continue; }
+        if (l.quantity != null) await sql`update loading_list_lines set quantity = ${Number(l.quantity) || 0} where id = ${Number(l.id)} and loading_list_id = ${nid}`;
+        if (l.cost_per_m3 != null) await sql`update loading_list_lines set cost_per_m3 = ${Number(l.cost_per_m3) || 0} where id = ${Number(l.id)} and loading_list_id = ${nid}`;
+      }
       return send(res, 200, { ok: true });
     }
 
