@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Accept invite — [Company Name]</title>
+  <meta name="robots" content="noindex" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="site-header">
+    <div class="container header-inner">
+      <a href="index.html" class="logo"><span class="logo-text">[Company Name]</span></a>
+    </div>
+  </header>
+
+  <main class="auth-main">
+    <div class="auth-card">
+      <h1>Create your account</h1>
+      <p class="auth-sub">You've been invited to the CRM &amp; stock system.</p>
+
+      <form class="auth-form" id="invite-form" novalidate hidden>
+        <div class="field">
+          <label for="iv-name">Your name</label>
+          <input type="text" id="iv-name" autocomplete="name" required />
+        </div>
+        <div class="field">
+          <label for="iv-email">Email</label>
+          <input type="email" id="iv-email" autocomplete="email" required />
+        </div>
+        <div class="field">
+          <label for="iv-password">Password</label>
+          <input type="password" id="iv-password" autocomplete="new-password" required placeholder="min 8 characters" />
+        </div>
+        <button type="submit" class="btn btn-primary btn-block">Create account</button>
+        <p class="form-note" id="iv-note" role="status" aria-live="polite"></p>
+      </form>
+
+      <p class="form-note" id="iv-status">Checking your invite…</p>
+    </div>
+  </main>
+
+  <script src="auth.js"></script>
+  <script>
+    (function () {
+      var params = new URLSearchParams(location.search);
+      var token = params.get('token') || '';
+      var form = document.getElementById('invite-form');
+      var status = document.getElementById('iv-status');
+      var note = document.getElementById('iv-note');
+
+      if (!token) { status.textContent = 'This link is missing its invite token.'; status.className = 'form-note err'; return; }
+
+      fetch('/api/invites/validate?token=' + encodeURIComponent(token), { credentials: 'same-origin' })
+        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+        .then(function (res) {
+          if (!res.ok) { status.textContent = res.d.error || 'This invite is not valid.'; status.className = 'form-note err'; return; }
+          status.hidden = true;
+          form.hidden = false;
+          if (res.d.email) { document.getElementById('iv-email').value = res.d.email; }
+        })
+        .catch(function () { status.textContent = 'Could not check the invite. Please try again.'; status.className = 'form-note err'; });
+
+      form.addEventListener('submit', function (e) {
+        e.preventDefault();
+        note.textContent = 'Creating…'; note.className = 'form-note';
+        fetch('/api/invites/accept', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
+          body: JSON.stringify({
+            token: token,
+            name: document.getElementById('iv-name').value,
+            email: document.getElementById('iv-email').value,
+            password: document.getElementById('iv-password').value
+          })
+        }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+          .then(function (res) {
+            if (!res.ok) { note.textContent = res.d.error || 'Something went wrong.'; note.className = 'form-note err'; return; }
+            window.location.href = 'app.html';
+          })
+          .catch(function () { note.textContent = 'Network error. Please try again.'; note.className = 'form-note err'; });
+      });
+    })();
+  </script>
+</body>
+</html>

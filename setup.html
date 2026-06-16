@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>First-time setup — [Company Name]</title>
+  <meta name="robots" content="noindex" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="site-header">
+    <div class="container header-inner">
+      <a href="index.html" class="logo"><span class="logo-text">[Company Name]</span></a>
+      <nav class="main-nav"><ul class="nav-list"><li><a href="login.html">Sign in</a></li></ul></nav>
+    </div>
+  </header>
+
+  <main class="auth-main">
+    <div class="auth-card">
+      <h1>Create the first admin</h1>
+      <p class="auth-sub">One-time setup. This only works until the first admin exists — after that it's disabled.</p>
+
+      <form class="auth-form" id="setup-form" novalidate>
+        <div class="field">
+          <label for="s-name">Your name</label>
+          <input type="text" id="s-name" name="name" autocomplete="name" required />
+        </div>
+        <div class="field">
+          <label for="s-email">Email</label>
+          <input type="email" id="s-email" name="email" autocomplete="email" required />
+        </div>
+        <div class="field">
+          <label for="s-password">Password</label>
+          <input type="password" id="s-password" name="password" autocomplete="new-password" required />
+          <p class="auth-sub" style="margin:8px 0 0;font-size:.85rem;">At least 8 characters.</p>
+        </div>
+        <button type="submit" class="btn btn-primary btn-block">Create admin account</button>
+        <p class="form-note" id="setup-note" role="status" aria-live="polite"></p>
+      </form>
+    </div>
+  </main>
+
+  <script src="auth.js"></script>
+  <script>
+    var f = document.getElementById('setup-form');
+    f.addEventListener('submit', function (e) {
+      e.preventDefault();
+      Auth.submit('/api/signup', {
+        name: f.name.value, email: f.email.value, password: f.password.value
+      }, document.getElementById('setup-note'), 'app.html');
+    });
+  </script>
+</body>
+</html>
